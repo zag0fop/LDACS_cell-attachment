@@ -1,0 +1,447 @@
+///////////////////////////////////////////////////////
+//
+//  LDACS ISO/IEC 11770-3:2021 key agreement mechanism 7 based 3-pass MAKE Protocol - KEM part
+//                      -- CertGS pre-stored at AS version--
+//
+///////////////////////////////////////////////////////
+
+theory ldacs_3_pass_iso_make_kem_a
+begin
+
+builtins: asymmetric-encryption, symmetric-encryption, signing, hashing
+
+functions: kdf/2, hmac/2
+
+/*:
+// Secure CellEntry procedure //
+1. GS -> AS: 'SIB': $UAgs, SACgs, mBC, tBC
+2. AS -> GS: 'CellEntryRequest': $UAas, SACgs, 'scgs'
+3. GS -> AS: 'CellEntryResponse': SACas, 'ciphersuite', mCC, tCC
+
+// LDACS ISO/IEC 11770-3:2021 key agreement mechanism 7 based 3-pass MAKE protocol //
+4. GS -> AS: Pgs, Ngs
+5. AS -> GS: 'algo', Pas, Nas, sign(<Pas, Pgs, $UAgs, SACgs, 'scgs', 'algo', Nas>,ltkAS), h(Pas, Pgs, $UAgs, SACgs, 'scgs', 'algo', Nas)
+6. GS -> AS: OCSP_pkGS, senc(<kBC, kCC, tkset>, kKEK), sign(<Pgs, Pas, $UAas, SACas, 'ciphersuite', Ngs, senc(<kBC, kCC, tkset>, kKEK)>,ltkGS), h(Pgs, Pas, $UAas, SACas, 'ciphersuite', Ngs, senc(<kBC, kCC, tkset>, kKEK)), (pkGS)
+*/
+
+/////////////////////////////////////
+// Public key infrastructure (PKI)
+////////////////////////////////////
+
+// Anyone can register at any time a public key together with its ID
+// But: only once per ID
+rule Register_pk:
+  [ Fr(~ltkX) ]
+  --[ OnlyOnceV(pk(~ltkX)) ]->
+  [
+    !Ltk($X, ~ltkX)
+    , !Pk($X, pk(~ltkX))
+    , Out(pk(~ltkX)) 
+  ]
+
+/////////////////////////////////////
+// Attacker
+/////////////////////////////////////
+
+// Compromising an agent's long-term key
+rule Reveal_ltk:
+  [ !Ltk($X, ltkX) ] --[ CorruptedLtk($X) ]-> [ Out(ltkX) ]
+  
+// Compromise an agent's KEM key
+rule Reveal_kem:
+	[ !KEMk($X, KEMkX) ] --[CorruptedKEMk($X)]-> [ Out(KEMkX) ]
+
+// Leaking an agent's session key
+rule Leak_session: 
+   [ !Sessk(s, k) ] --[ Leaked(k) ]-> [ Out(k) ]
+
+
+/////////////////////////////////////
+// Secure Channel Rules
+/////////////////////////////////////
+rule ChanOut_S:
+    [ Out_S($A,$B,x) ]
+    --[ ChanOut_S($A,$B,x) ]->
+    [ !Sec($A,$B,x) ]
+
+rule ChanIn_S:
+    [ !Sec($A,$B,x) ]
+    --[ ChanIn_S($A,$B,x) ]->
+    [ In_S($A,$B,x) ]
+
+
+/////////////////////////////////////
+// Protocol Role Script Start
+/////////////////////////////////////
+
+rule init_AS:
+    [ 
+        Fr(~sid)            // generate new AS session id
+        , !Ltk($UAas, ltkAS) //get AS private key and bind $UAas to ltkAS
+    ]
+    --[ Create($UAas, ~sid) ]->
+    [
+        S_AS_init($UAas, ~sid, ltkAS) 
+    ]
+
+// This protocol assumes a secure channel between PKI validation authority and AS/GS prior to the protocol run
+// i.e. the AS has to have the pkCA
+rule CA_init:
+    [ !Ltk($UAca, ltkCA) ] //get CA private key and bind $UAca to ltkCA
+    -->
+    [
+        S_CA_init($UAca, ltkCA)
+        , Out_S($UAca, $UAas, <pk(ltkCA)>)
+    ]
+
+rule AS_0:
+    [   
+        S_AS_init($UAas, sid, ltkAS)
+        , In_S($UAca, $UAas, <pkCA>)
+    ]
+    -->
+    [
+        S_AS_0($UAas, sid, ltkAS, pkCA)
+    ]
+
+rule init_GS:
+    let 
+        tBC = hmac(<$UAgs, ~SACgs, 'mBC', 'SF'>, ~kBC)  // build tBC from Step 1 in Fig. 2
+    in
+    [ 
+        Fr(~sid)                // generate new GS session id
+        , Fr(~SACgs)            // generate new temporary GS SAC
+        , Fr(~kBC)              // generate new key kBC
+        , Fr(~kCC)              // generate new key kCC
+        , !Ltk($UAgs, ltkGS)     // get GS private key and bind $UAgs to ltkGS
+    ]
+    --[ Create($UAgs, ~sid) ]->
+    [ 	
+        S_GS_0($UAgs, ~SACgs, ~sid, ltkGS, ~kBC, ~kCC)
+		, Out(<'SIB', $UAgs, ~SACgs, 'mBC', 'SF', tBC>)
+    ]
+
+// only look at AS has CertGS cases here - denoted in filename as "path_a"
+
+// case a): AS has CertGS
+rule AS_1:
+    [   
+        S_AS_0($UAas, sid, ltkAS, pkCA)
+        , In(<'SIB', $UAgs, SACgs, 'mBC', 'SF', tBC>)
+    ]
+    -->
+    [
+        S_AS_1($UAas, sid, ltkAS, pkCA, $UAgs, SACgs, tBC)
+		, Out(<'CellEntryRequest', $UAas, SACgs, 'scgs'>)
+    ]
+	
+rule GS_1:
+    let 
+        tCC = hmac(<$UAgs, ~SACas, 'ciphersuite', 'mCC', 'MF'>, kCC)   // build tCC from Step 3 in Fig. 2
+    in
+    [
+        S_GS_0($UAgs, SACgs, sid, ltkGS, kBC, kCC)
+        , In(<'CellEntryRequest', $UAas, SACgs, 'scgs'>)
+        , Fr(~SACas)    // generate new AS SAC
+    ]
+    -->
+    [
+        S_GS_1($UAgs, SACgs, sid, ltkGS, kBC, kCC, $UAas, ~SACas)
+		, Out(<'CellEntryResponse', ~SACas, 'ciphersuite', tCC>)
+    ]
+	
+	
+rule AS_2:
+    [   
+        S_AS_1($UAas, sid, ltkAS, pkCA, $UAgs, SACgs, tBC)
+        , In(<'CellEntryResponse', SACas, 'ciphersuite', tCC>)        
+    ]
+    --> 
+    [ 
+        S_AS_2($UAas, SACas, sid, ltkAS, pkCA, $UAgs, SACgs, tBC, tCC)
+    ]
+
+
+// KEM version
+
+rule GS_2:
+    let 
+        Pgs = pk(~x) // compute KEM public GS key Pgs
+    in
+    [   S_GS_1($UAgs, SACgs, sid, ltkGS, kBC, kCC, $UAas, SACas)
+        , Fr(~x)    // generate KEM private GS key "x"
+        , Fr(~Ngs)  // generate fresh nonce
+		
+    ]     
+    --[ Running($UAgs, $UAas, sid, Pgs)
+    ]->
+    [ 
+        S_GS_2($UAgs, SACgs, sid, ltkGS, kBC, kCC, $UAas, SACas, Pgs, ~x, ~Ngs)
+		, !KEMk($UAgs, ~x) // check for KEM leak
+		, Out(<Pgs, ~Ngs>)
+    ]
+	
+
+rule AS_3:
+    let Pas = aenc{~y}Pgs                     // compute KEM public AS key Pas
+		z = <~y, ~Nas, Ngs, $UAas, $UAgs>   // AS-GS shared secret consists of the KEM shared secret and AS, GS nonces and IDs ($UAas, $UAgs)
+        kASGS = kdf(z,'s')                  // derive AS-GS user-data protection key
+        kM = kdf(z,'m')                     // derive MAC MAKE protocol key (consitency or key confirmation)
+		kDC = kdf(z,'d')                    // derive AS-GS DCCH protection key
+		kKEK = kdf(z,'k')                   // derive Key Encryption Key (KEK) for secure transmission of kBC, kCC
+		
+        mAS = <Pas, Pgs, $UAgs, SACgs, 'scgs', 'algo', ~Nas> // build mAS 
+        tAS = hmac(mAS, kM)                                 // generate AS MAC - first AS then GS identifier
+		sAS = sign(mAS, ltkAS)                              // generate AS signature
+    in
+    [
+        S_AS_2($UAas, SACas, sid, ltkAS, pkCA, $UAgs, SACgs, tBC, tCC)
+		, In(<Pgs, Ngs>)  
+		, Fr(~y)        // generate KEM private AS key "y"
+		, Fr(~Nas)      // generate fresh nonce
+    ]
+    --[ Running($UAas, $UAgs, sid, Pas)
+    ]->
+    [ 
+		S_AS_3($UAas, SACas, sid, ltkAS, pkCA, $UAgs, SACgs, tBC, tCC, Pgs, Ngs, ~Nas, Pas, kASGS, kM, kDC, kKEK)
+		, !KEMk($UAas, ~y)    // check for KEM leakage
+		, Out(<'algo', Pas, ~Nas, sAS, mAS>)
+    ]
+
+rule GS_3:
+    [ 
+        S_GS_2($UAgs, SACgs, sid, ltkGS, kBC, kCC, $UAas, SACas, Pgs, x, Ngs)
+        , In(<'algo', Pas, Nas, sAS, tAS>)
+    ]
+    -->
+    [	S_GS_3($UAgs, SACgs, sid, ltkGS, kBC, kCC, $UAas, SACas, Pgs, x, Ngs, Pas, Nas, sAS, tAS)
+		, Out_S($UAgs, $UAca, <$UAgs, pk(ltkGS)>)
+    ]
+
+rule CA_1:
+    let
+        OCSPCertGS = sign(<$UAgs, pkGS>, ltkCA)
+    in
+    [
+        S_CA_0($UAca, ltkCA)
+        , In_S($UAgs, $UAca, <$UAgs, pkGS>)
+    ]
+    -->
+    [
+        Out_S($UAca, $UAgs, <OCSPCertGS>)
+    ]
+
+rule GS_4:
+    let 
+        z = <adec(Pas, x), Nas, Ngs, $UAas, $UAgs>   // AS-GS shared secret consists of the KEM shared secret and AS, GS nonces and IDs ($UAas, $UAgs)
+        kASGS = kdf(z,'s')                  // derive AS-GS user-data protection key
+        kM = kdf(z,'m')                     // derive MAC MAKE protocol key (consitency or key confirmation)
+		kDC = kdf(z,'d')                    // derive AS-GS DCCH protection key
+		kKEK = kdf(z,'k')                   // derive Key Encryption Key (KEK) for secure transmission of key set
+
+		tkset = hmac(<kBC, kCC>, kKEK)                            // calculate MAC for k_set AEAD
+        check_mAS = <Pas, Pgs, $UAgs, SACgs, 'scgs', 'algo', Nas>
+        check_tAS = hmac(check_mAS, kM)  // compute MAC to check for AS MAC validity
+
+        mGS = <Pgs, Pas, $UAas, SACas, 'ciphersuite', Ngs, senc(<kBC, kCC, tkset>, kKEK)>    // build mGS
+        tGS = hmac(mGS, kM)                                                                 // generate GS MAC - first GS then AS identifier
+		sGS = sign(mGS, ltkGS)                                                              // generate GS signature
+		
+    in
+    [ 
+        S_GS_3($UAgs, SACgs, sid, ltkGS, kBC, kCC, $UAas, SACas, Pgs, x, Ngs, Pas, Nas, sAS, tAS)
+		, !Pk($UAas, pkAS) // get AS public key
+        , In_S($UAca, $UAgs, <OCSPCertGS>)
+    ]
+    --[
+        Eq(verify(sAS, check_mAS, pkAS), true)          // verify AS signature
+        , Eq(tAS, check_tAS)                            // check AS MAC for validity - consistency
+        , Commit($UAgs, $UAas, sid, <Pgs, Pas>)           // Executability
+		, Confirm($UAgs, $UAas, sid, kASGS)               // kAS,GS key consistency between $UAas, $UAgs in session sid
+		, Confirm($UAgs, $UAas, sid, kBC)                 // BC key consistency between $UAas, $UAgs in session sid
+        , Confirm($UAgs, $UAas, sid, kCC)                 // CC key consistency between $UAas, $UAgs in session sid
+        , Confirm($UAgs, $UAas, sid, kDC)                 // DC key consistency between $UAas, $UAgs in session sid
+        , Honest($UAgs), Honest($UAas)
+    ]->
+    [	S_GS_4($UAgs, SACgs, sid, ltkGS, kBC, kCC, $UAas, SACas, Pgs, x, Ngs, Pas, Nas, sAS, tAS, OCSPCertGS)
+		, !Sessk(sid, kASGS)
+		, Out(<OCSPCertGS, senc(<kBC, kCC, tkset>, kKEK), sGS, tGS>)
+    ]
+
+// case a): AS has CertGS
+rule AS_4:
+    let 
+        check_mGS = <Pgs, Pas, $UAas, SACas, 'ciphersuite', Ngs, senc(<kBC, kCC, tkset>, kKEK)>
+        check_tGS = hmac(check_mGS, kM)       // calculate MAC for kM consistency
+		check_tkset = hmac(<kBC, kCC>, kKEK) // calculate MAC for kset AEAD validity check
+
+        check_tBC = hmac(<$UAgs, SACgs, 'mBC', 'SF'>, kBC) 
+        check_tCC = hmac(<$UAgs, SACas, 'ciphersuite', 'mCC', 'MF'>, kCC)
+    in
+    [
+        S_AS_3($UAas, SACas, sid, ltkAS, pkCA, $UAgs, SACgs, tBC, tCC, Pgs, Ngs, Nas, Pas, kASGS, kM, kDC, kKEK)
+		, !Pk($UAgs, pkGS) // get GS public key - in other words - use the pre-stored GS Cert
+        , In(<OCSPCertGS, senc(<kBC, kCC, tkset>, kKEK), sGS, tGS>)
+    ]
+    --[ 
+        // I believe that atm this line is causing the long runtime with 64GB RAM
+        Eq(verify(OCSPCertGS, <$UAgs, pkGS>, pkCA), true)    // Verify CA confirms current authenticity of pkGS
+        , Eq(verify(sGS, check_mGS, pkGS), true)            // verify GS signature with prestored pkGS
+        , Eq(tGS, check_tGS)                                // check GS MAC for validity - consistency
+		, Eq(check_tkset, tkset)                            // check tkset MAC for validity
+        , Eq(check_tBC, tBC)                                // check tBC MAC for validity
+        , Eq(check_tCC, tCC)                                // check tCC MAC for validity
+		, Commit($UAas, $UAgs, sid, <Pas, Pgs>)               // Executability
+		, Confirm($UAgs, $UAas, sid, kASGS)                   // kAS,GS key consistency between $UAas, $UAgs in session sid
+		, Confirm($UAgs, $UAas, sid, kBC)                     // BC key consistency between $UAas, $UAgs in session sid
+        , Confirm($UAgs, $UAas, sid, kCC)                     // CC key consistency between $UAas, $UAgs in session sid
+        , Confirm($UAgs, $UAas, sid, kDC)                     // DC key consistency between $UAas, $UAgs in session sid
+        , Secret(kASGS)                                     // check for kAS,GS key secrecy
+		, Secret(kBC)                                       // check for kBC key secrecy
+        , Secret(kCC)                                       // check for kCC key secrecy
+        , Secret(kDC)                                       // check for kDC key secrecy
+		, Honest($UAas), Honest($UAgs)
+    ]->
+    [ 
+        !Sessk(sid, kASGS) 
+    ]
+	
+	
+///////////////////////////////// LEMMAS ////////////////////////////////////////////
+restriction Equality:
+    "All x y #i. Eq(x,y) @i ==> x = y"
+
+// rules which contain the OnlyOnceV(x)-event will be executed only once per x
+restriction OnlyOnceV:
+    "All #i #j x. OnlyOnceV(x)@#i & OnlyOnceV(x)@#j ==> #i = #j"
+
+
+/*
+ * session-exist lemmas
+ *
+ * verify that the protocol runs through with the AS having the GS pubKey stored locally
+ * for one session only
+ */
+ lemma exists_session_a:
+ exists-trace
+ "Ex A B sid_a sid_b x y #i #j #k #l. 
+     Create(A, sid_a)@i & Create(B, sid_b)@j
+        & Commit(B, A, sid_b, <y, x>)@k & Commit(A, B, sid_a, <x, y>)@l
+        & i < j & j < k & k < l"
+
+/*
+ *   authentication lemmas
+ *
+ * following Lowes hierarchical model of authentication specification 
+ * (https:/ /ieeexplore.ieee.org/document/596782)
+ * Proofing authentication via injective agreement in both directions!
+ *
+ * If A finishes a run with B by exchanging y at time i
+ * he can be sure, B also ran the protocol with A
+ * and y has not been exchanged before in any other run (injective agreement)
+ * the only exclusion is when a LTK has been compromised before
+ */ 
+
+lemma mutual_authentication_A:
+    "All A B x y ia #i. Commit(A, B, ia, <x, y>)@i ==> 
+            ( Ex ib #j. Running(B, A, ib, y)@j
+              & j<i
+              & not (Ex A2 B2 ia2 #i2. Commit(A2, B2, ia2, <x, y>)@i2 & not(#i2=#i))
+            )
+            | (Ex C #r. CorruptedLtk(C)@r & Honest(C)@i & #r<#i)
+			| (Ex C #r. CorruptedKEMk(C)@r & Honest(C)@i & #r<#i)"
+
+// Now for "B" direction		
+lemma mutual_authentication_B:
+    "All A B x y ia #i. Commit(B, A, ia, <y, x>)@i ==> 
+            ( Ex ib #j. Running(A, B, ib, x)@j
+              & j<i
+              & not (Ex A2 B2 ia2 #i2. Commit(B2, A2, ia2, <y, x>)@i2 & not(#i2=#i))
+            )
+            | (Ex C #r. CorruptedLtk(C)@r & Honest(C)@i & #r<#i)
+			| (Ex C #r. CorruptedKEMk(C)@r & Honest(C)@i & #r<#i)"
+
+
+/*
+ * session uniqueness lemma
+ *
+ * To achieve Lowe's definition of full agreement in a given session the set of values in ds that AS and GS agree on, 
+ * must define a unique run of the protocol between the two parties. 
+ * For this we introduce the property "session uniqness", 
+ * which was defined in the security proof for the Wireguard model 
+ *(https://www.wireguard.com/papers/wireguard-formal-verification.pdf) 
+ * as different sessions will always have different, unique session keys.
+ */
+
+ lemma session_uniqueness_A:
+    "All A B sid_a sid_b x y #i #j.
+        Commit(A, B, sid_a, <x, y>) @ #i
+        & Commit(A, B, sid_b, <x, y>) @ #j
+    ==> (#i = #j)"
+
+// Now for "B" direction
+lemma session_uniqueness_B:
+    "All A B sid_a sid_b x y #i #j.
+        Commit(B, A, sid_a, <y, x>) @ #i
+        & Commit(B, A, sid_b, <y, x>) @ #j
+    ==> (#i = #j)"
+
+/*
+ * secrecy lemma:
+ */
+
+lemma secrecy:
+    "All x #i.
+        Secret(x)@i ==> 
+            not (Ex #j. K(x)@j)
+            | (Ex #u. Leaked(x)@u)
+            | (Ex A #r. CorruptedKEMk(A)@r & Honest(A)@i)
+            | (Ex A #r. CorruptedLtk(A)@r & Honest(A)@i)"
+
+/*
+ * Perfect Forward Secrecy:
+ * whenever a secret action Secret(x) occurs at timepoint i, 
+ * the adversary does not know x 
+ * or an agent A (AS or GS) claimed to be honest at time point i 
+ * has been compromised at a timepoint r before
+ * -> the point is: he needs to be compromised *before* 
+ * -> if he was compromised *later* all older secrets still remain secret
+*/
+
+lemma secrecy_pfs:
+    "All x #i.
+        Secret(x)@i ==>
+            not (Ex #j. K(x)@j)
+            | (Ex #u. Leaked(x)@u)
+            | (Ex A #r. CorruptedKEMk(A)@r & Honest(A)@i)
+            | (Ex A #r. CorruptedLtk(A)@r & Honest(A)@i & r < i)"
+
+/*
+ * consistency lemma
+ *
+ * For all sessions ia with participants A and B and keys key and key2
+ * when A confirms key key at time i in session ia and 
+ * when B confirms key key2 at time j and in session ia
+ * and no agent was honest before but has been corrupted over time
+ * then key and key2 must be the same
+ * (mutual understanding of key key)
+ */
+
+lemma key_consistency_A:
+	"All A B ia key key2 #i #j .
+		Confirm(A, B, ia, key)@#i
+		& Confirm(B, A, ia, key2)@#j
+		& not (Ex #r. CorruptedLtk(B)@r & Honest(B)@i & #r<#i)
+		& not (Ex #r. CorruptedKEMk(B)@r & Honest(B)@i & #r<#i)
+		==> (key = key2)"
+
+// Now for B direction	
+lemma key_consistency_B:
+	"All A B ia key key2 #i #j .
+		Confirm(B, A, ia, key)@#i
+		& Confirm(A, B, ia, key2)@#j
+		& not (Ex #r. CorruptedLtk(A)@r & Honest(A)@i & #r<#i)
+		& not (Ex #r. CorruptedKEMk(A)@r & Honest(A)@i & #r<#i)
+		==> (key = key2)"
+
+end
